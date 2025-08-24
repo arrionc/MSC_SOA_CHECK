@@ -1,0 +1,73 @@
+import re
+
+def _normalize_amount_str(s: str) -> float | None:
+    """
+    Convert a money-looking string to a float.
+    - Handles thousand separators with spaces or commas.
+    - Handles parentheses for negatives.
+    - Ignores stray currency codes/symbols around the number.
+    """
+    if s is None:
+        return None
+    s = s.strip()
+
+    # Extract the numeric core (allow spaces/commas inside)
+    m = re.search(r'\(?\s*\$?\s*([\d][\d,\s]*)(?:\.(\d{2}))?\s*\)?', s)
+    if not m:
+        return None
+
+    int_part = m.group(1)
+    dec_part = m.group(2) or "00"
+
+    # Remove spaces/commas used as thousand separators
+    int_part = int_part.replace(" ", "").replace(",", "")
+    num_str = f"{int_part}.{dec_part}"
+
+    # Negative if wrapped in parentheses
+    negative = s.strip().startswith("(") and s.strip().endswith(")")
+    try:
+        val = float(num_str)
+        return -val if negative else val
+    except ValueError:
+        return None
+
+
+def extract_invoice_total(text: str) -> float | None:
+    """
+    Try specific 'Grand Total Due' first.
+    If not found, fall back to the last currency-looking number in the document.
+    """
+    # 1) Explicit 'Grand Total Due' pattern (robust to spacing/colons)
+    m = re.search(
+        r'Grand\s*Total\s*Due\s*[:\-]?\s*(?:USD\s*)?\$?\s*\(?\s*([\d][\d,\s]*)(?:\.(\d{2}))?\s*\)?',
+        text,
+        flags=re.IGNORECASE
+    )
+    if m:
+        core = m.group(0)  # entire matched segment for sign/parentheses detection
+        # Reuse normalization on the captured groups
+        whole = m.group(1)
+        cents = m.group(2) or "00"
+        candidate = f"${whole}.{cents}"
+        val = _normalize_amount_str(core if core else candidate)
+        if val is not None:
+            return val
+
+    # 2) Fallback: find ALL currency-looking numbers in reading order, pick the LAST one
+    lines = text.splitlines()
+    money_like_indices: list[tuple[int, str]] = []
+
+    # A "money-like" line: looks like $ 1 234.56 or 1,234.56 or 1234.56 or 1 234 (w/ optional .cc),
+    # possibly wrapped in parentheses.
+    money_line_re = re.compile(r'^\s*\(?\s*\$?\s*\d[\d,\s]*\.?\d{0,2}\s*\)?\s*$', re.IGNORECASE)
+
+    for i, line in enumerate(lines):
+        if money_line_re.match(line):
+            money_like_indices.append((i, line))
+
+    if money_like_indices:
+        # Take the last one
+        _, last_line = money_like_indices[-1]
+        return _normalize_amount_str(last_line)
+
+    return None
